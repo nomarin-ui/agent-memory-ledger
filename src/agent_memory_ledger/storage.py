@@ -9,7 +9,7 @@ from typing import Any, Iterator
 
 from .hashing import GENESIS_HASH, canonical_json, compute_op_hash
 
-SCHEMA_PATH = Path(__file__).parent / "schema.sql"
+from .migrations import current_version, migrate
 
 
 def utcnow_iso() -> str:
@@ -43,7 +43,13 @@ class SQLiteStorage:
         self._migrate()
 
     def _migrate(self) -> None:
-        self._conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+        """Bring the database up to the latest schema version."""
+        migrate(self._conn)
+
+    @property
+    def schema_version(self) -> int:
+        """Highest migration applied to this database."""
+        return current_version(self._conn)
 
     def close(self) -> None:
         self._conn.close()
@@ -138,7 +144,7 @@ class SQLiteStorage:
         )
         value = None if operation == "delete" else new_json
         self._conn.execute(
-            "INSERT OR REPLACE INTO memory_snapshots "
+            "INSERT INTO memory_snapshots "
             "(agent_id, key, value, valid_from, valid_to, op_id) "
             "VALUES (?, ?, ?, ?, NULL, ?)",
             (agent_id, key, value, ts, op_id),
@@ -158,21 +164,27 @@ class SQLiteStorage:
     # -- queries -------------------------------------------------------
 
     def current(self, agent_id: str, key: str) -> sqlite3.Row | None:
+        """The agent's present belief about this key, or None."""
         return self._conn.execute(
             "SELECT value, op_id, valid_from FROM memory_snapshots "
-            "WHERE agent_id = ? AND key = ? AND valid_to IS NULL",
+            "WHERE agent_id = ? AND key = ? AND valid_to IS NULL "
+            "ORDER BY op_id DESC LIMIT 1",
             (agent_id, key),
         ).fetchone()
 
     def as_of(self, agent_id: str, at: str) -> list[sqlite3.Row]:
         """Every belief held by this agent at instant `at`. One indexed scan."""
         return self._conn.execute(
-            "SELECT key, value, valid_from, op_id FROM memory_snapshots "
+            "SELECT key, value, valid_from, op_id FROM memory_snapshots s "
             "WHERE agent_id = ? AND valid_from <= ? "
             "  AND (valid_to IS NULL OR valid_to > ?) "
             "  AND value IS NOT NULL "
+            "  AND op_id = (SELECT MAX(op_id) FROM memory_snapshots s2 "
+            "               WHERE s2.agent_id = s.agent_id AND s2.key = s.key "
+            "                 AND s2.valid_from <= ? "
+            "                 AND (s2.valid_to IS NULL OR s2.valid_to > ?)) "
             "ORDER BY key",
-            (agent_id, at, at),
+            (agent_id, at, at, at, at),
         ).fetchall()
 
     def history(self, agent_id: str, key: str) -> list[sqlite3.Row]:

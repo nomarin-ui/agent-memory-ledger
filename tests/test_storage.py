@@ -161,3 +161,27 @@ def test_snapshot_rebuild_after_cache_wipe(storage):
     assert storage.as_of("a", "9999") == []
     storage.rebuild_snapshots("a")
     assert len(storage.as_of("a", "9999")) == 1
+
+def test_same_microsecond_writes_do_not_collide(storage):
+    """1000 ops, one frozen timestamp, one key. None may be lost."""
+    frozen = "2026-01-01T00:00:00.000000+00:00"
+    for i in range(1000):
+        storage.append(
+            agent_id="a", operation="write" if i == 0 else "update",
+            key="k", new_value=i, ts=frozen,
+        )
+
+    rows = storage._conn.execute(
+        "SELECT COUNT(*) AS n FROM memory_snapshots WHERE agent_id='a' AND key='k'"
+    ).fetchone()
+    assert rows["n"] == 1000           # nothing silently overwritten
+    assert storage.verify("a") == 1000  # chain intact
+
+
+def test_same_microsecond_current_is_last_write(storage):
+    frozen = "2026-01-01T00:00:00.000000+00:00"
+    for i in range(100):
+        storage.append(agent_id="a", operation="write", key="k",
+                       new_value=i, ts=frozen)
+
+    assert storage.current("a", "k")["value"] == "99"

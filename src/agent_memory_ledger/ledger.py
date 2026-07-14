@@ -8,6 +8,9 @@ from typing import Any
 
 from .storage import Operation, SQLiteStorage, utcnow_iso
 
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+
 
 def _to_iso(when: str | datetime) -> str:
     return when.isoformat() if isinstance(when, datetime) else when
@@ -16,6 +19,17 @@ def _to_iso(when: str | datetime) -> str:
 def _decode(raw: str | None) -> Any:
     return None if raw is None else json.loads(raw)
 
+@dataclass(frozen=True, slots=True)
+class ReadRecord:
+    """One time an agent consulted its memory, and what it saw."""
+
+    ts: str                      # when the agent read
+    key: str
+    value_seen: Any              # what it got back (None = key was a miss)
+    written_at: str | None       # when that value was written
+    age_at_read: timedelta | None  # how stale the value already was
+    provenance: str | None       # why the read happened
+    op_id_seen: int | None       # the exact ledger row consulted
 
 class MemoryLedger:
     """Append-only, hash-chained record of what an agent believed, and when."""
@@ -90,6 +104,73 @@ class MemoryLedger:
         )
         return value
 
+    def reads_before(
+        self,
+        when: str | datetime,
+        *,
+        key: str | None = None,
+        limit: int = 50,
+    ) -> list[ReadRecord]:
+        """Every memory the agent consulted before this moment, newest first.
+
+        The debugging primitive: an agent made a bad call at 10:05 -- what
+        had it just read, and how old was it?
+
+        >>> ledger.reads_before("2026-06-15T10:05:00+00:00")[0].age_at_read
+        datetime.timedelta(days=94)
+        """
+        sql = (
+            "SELECT r.ts, r.key, r.provenance, r.op_id_seen, "
+            "       o.new_value AS value_seen, o.ts AS written_at "
+            "FROM memory_reads r "
+            "LEFT JOIN memory_operations o ON o.id = r.op_id_seen "
+            "WHERE r.agent_id = ? AND r.ts <= ? "
+        )
+        params: list[Any] = [self.agent_id, _to_iso(when)]
+        if key is not None:
+            sql += "AND r.key = ? "
+            params.append(key)
+        sql += "ORDER BY r.ts DESC, r.id DESC LIMIT ?"
+        params.append(limit)
+
+        rows = self.storage._conn.execute(sql, params).fetchall()
+        return [self._to_read_record(r) for r in rows]
+
+    @staticmethod
+    def _to_read_record(row: Any) -> ReadRecord:
+        """Build a ReadRecord, computing how stale the value was when read."""
+        written_at = row["written_at"]
+        age = None
+        if written_at is not None:
+            age = datetime.fromisoformat(row["ts"]) - datetime.fromisoformat(written_at)
+        return ReadRecord(
+            ts=row["ts"],
+            key=row["key"],
+            value_seen=_decode(row["value_seen"]),
+            written_at=written_at,
+            age_at_read=age,
+            provenance=row["provenance"],
+            op_id_seen=row["op_id_seen"],
+        )
+
+    def stale_reads(
+        self,
+        when: str | datetime,
+        *,
+        older_than: timedelta,
+        limit: int = 50,
+    ) -> list[ReadRecord]:
+        """Reads where the value was already older than `older_than`.
+
+        >>> ledger.stale_reads(incident_time, older_than=timedelta(days=90))
+        [ReadRecord(key='user_employer', age_at_read=..., ...)]
+        """
+        return [
+            r
+            for r in self.reads_before(when, limit=limit * 4)
+            if r.age_at_read is not None and r.age_at_read > older_than
+        ][:limit]
+    
     # -- time travel ---------------------------------------------------
 
     def as_of(self, when: str | datetime) -> dict[str, Any]:
