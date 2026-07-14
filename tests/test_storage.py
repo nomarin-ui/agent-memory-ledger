@@ -185,3 +185,15 @@ def test_same_microsecond_current_is_last_write(storage):
                        new_value=i, ts=frozen)
 
     assert storage.current("a", "k")["value"] == "99"
+
+def test_concurrent_appends_do_not_fork_the_chain(storage):
+    """Agent frameworks run tools on a thread pool. The chain must survive it."""
+    import concurrent.futures
+
+    def write(i: int) -> None:
+        storage.append(agent_id="a", operation="write", key=f"k{i}", new_value=i)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(write, range(50)))
+
+    assert storage.verify("a") == 50      # 50 ops, one unbroken chain

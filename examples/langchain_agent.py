@@ -12,6 +12,8 @@ import os
 from agent_memory_ledger import MemoryLedger
 from agent_memory_ledger.langchain_tools import make_memory_tools
 
+from langchain.agents import create_agent
+
 DB = "agent_demo.db"
 
 SYSTEM = """You are a helpful assistant with a memory ledger.
@@ -35,10 +37,10 @@ def main() -> None:
         os.remove(DB)
 
     with MemoryLedger("demo_agent", DB) as ledger:
-        agent = create_react_agent(
+        agent = create_agent(
             ChatAnthropic(model="claude-sonnet-4-6"),
-            make_memory_tools(ledger),
-            prompt=SYSTEM,
+            tools=make_memory_tools(ledger),
+            system_prompt=SYSTEM,
         )
 
         turns = [

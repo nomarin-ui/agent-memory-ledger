@@ -11,6 +11,7 @@ from .hashing import GENESIS_HASH, canonical_json, compute_op_hash
 
 from .migrations import current_version, migrate
 
+import threading
 
 def utcnow_iso() -> str:
     """ISO8601 UTC with microseconds. Lexicographically sortable."""
@@ -38,8 +39,18 @@ class ChainIntegrityError(Exception):
 class SQLiteStorage:
     def __init__(self, path: str | Path = "ledger.db") -> None:
         self.path = str(path)
-        self._conn = sqlite3.connect(self.path, isolation_level=None)
+        # check_same_thread=False: agent frameworks (LangGraph, etc.) run tool
+        # calls on a thread pool. The connection must cross threads.
+        self._conn = sqlite3.connect(
+            self.path, isolation_level=None, check_same_thread=False
+        )
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode = WAL")
+        self._conn.execute("PRAGMA foreign_keys = ON")
+        # Disabling the thread check does not make sqlite3 thread-safe. This
+        # lock serializes appends so two threads cannot read the same chain
+        # tip and fork the chain.
+        self._lock = threading.RLock()
         self._migrate()
 
     def _migrate(self) -> None:
@@ -83,43 +94,44 @@ class SQLiteStorage:
     ) -> Operation:
         """Append one operation and extend the hash chain.
 
-        IMMEDIATE transaction: takes the write lock up front so two
-        concurrent appends cannot read the same chain tip and fork it.
+        Serialized: reading the chain tip and writing the new link must be
+        atomic, or concurrent writers fork the chain.
         """
         ts = ts or utcnow_iso()
         old_json = canonical_json(old_value)
         new_json = canonical_json(new_value)
 
-        self._conn.execute("BEGIN IMMEDIATE")
-        try:
-            prev_hash = self._tip_hash(agent_id)
-            op_hash = compute_op_hash(
-                prev_hash=prev_hash,
-                ts=ts,
-                agent_id=agent_id,
-                operation=operation,
-                key=key,
-                old_value=old_json,
-                new_value=new_json,
-                provenance=provenance,
-            )
-            cur = self._conn.execute(
-                "INSERT INTO memory_operations "
-                "(ts, agent_id, operation, key, old_value, new_value, "
-                " provenance, prev_hash, op_hash) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (ts, agent_id, operation, key, old_json, new_json,
-                 provenance, prev_hash, op_hash),
-            )
-            op_id = int(cur.lastrowid)
-            self._apply_snapshot(
-                agent_id=agent_id, key=key, operation=operation,
-                new_json=new_json, ts=ts, op_id=op_id,
-            )
-            self._conn.execute("COMMIT")
-        except Exception:
-            self._conn.execute("ROLLBACK")
-            raise
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                prev_hash = self._tip_hash(agent_id)
+                op_hash = compute_op_hash(
+                    prev_hash=prev_hash,
+                    ts=ts,
+                    agent_id=agent_id,
+                    operation=operation,
+                    key=key,
+                    old_value=old_json,
+                    new_value=new_json,
+                    provenance=provenance,
+                )
+                cur = self._conn.execute(
+                    "INSERT INTO memory_operations "
+                    "(ts, agent_id, operation, key, old_value, new_value, "
+                    " provenance, prev_hash, op_hash) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (ts, agent_id, operation, key, old_json, new_json,
+                     provenance, prev_hash, op_hash),
+                )
+                op_id = int(cur.lastrowid)
+                self._apply_snapshot(
+                    agent_id=agent_id, key=key, operation=operation,
+                    new_json=new_json, ts=ts, op_id=op_id,
+                )
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
 
         return Operation(
             id=op_id, ts=ts, agent_id=agent_id, operation=operation, key=key,
@@ -155,11 +167,12 @@ class SQLiteStorage:
         provenance: str | None = None, ts: str | None = None,
     ) -> None:
         """Unchained. Reads don't mutate belief, so they don't need tamper-evidence."""
-        self._conn.execute(
-            "INSERT INTO memory_reads (ts, agent_id, key, op_id_seen, provenance) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (ts or utcnow_iso(), agent_id, key, op_id_seen, provenance),
-        )
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO memory_reads (ts, agent_id, key, op_id_seen, provenance) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (ts or utcnow_iso(), agent_id, key, op_id_seen, provenance),
+            )
 
     # -- queries -------------------------------------------------------
 
@@ -236,21 +249,22 @@ class SQLiteStorage:
 
     def rebuild_snapshots(self, agent_id: str) -> int:
         """Drop and replay. Proves snapshots are pure derivation, nothing more."""
-        self._conn.execute("BEGIN IMMEDIATE")
-        try:
-            self._conn.execute(
-                "DELETE FROM memory_snapshots WHERE agent_id = ?", (agent_id,)
-            )
-            n = 0
-            for row in list(self.iter_ops(agent_id)):
-                self._apply_snapshot(
-                    agent_id=row["agent_id"], key=row["key"],
-                    operation=row["operation"], new_json=row["new_value"],
-                    ts=row["ts"], op_id=row["id"],
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute(
+                    "DELETE FROM memory_snapshots WHERE agent_id = ?", (agent_id,)
                 )
-                n += 1
-            self._conn.execute("COMMIT")
-        except Exception:
-            self._conn.execute("ROLLBACK")
-            raise
+                n = 0
+                for row in list(self.iter_ops(agent_id)):
+                    self._apply_snapshot(
+                        agent_id=row["agent_id"], key=row["key"],
+                        operation=row["operation"], new_json=row["new_value"],
+                        ts=row["ts"], op_id=row["id"],
+                    )
+                    n += 1
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
         return n
