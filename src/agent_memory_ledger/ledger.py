@@ -119,21 +119,9 @@ class MemoryLedger:
         >>> ledger.reads_before("2026-06-15T10:05:00+00:00")[0].age_at_read
         datetime.timedelta(days=94)
         """
-        sql = (
-            "SELECT r.ts, r.key, r.provenance, r.op_id_seen, "
-            "       o.new_value AS value_seen, o.ts AS written_at "
-            "FROM memory_reads r "
-            "LEFT JOIN memory_operations o ON o.id = r.op_id_seen "
-            "WHERE r.agent_id = ? AND r.ts <= ? "
+        rows = self.storage.reads_before(
+            self.agent_id, _to_iso(when), key=key, limit=limit
         )
-        params: list[Any] = [self.agent_id, _to_iso(when)]
-        if key is not None:
-            sql += "AND r.key = ? "
-            params.append(key)
-        sql += "ORDER BY r.ts DESC, r.id DESC LIMIT ?"
-        params.append(limit)
-
-        rows = self.storage._conn.execute(sql, params).fetchall()
         return [self._to_read_record(r) for r in rows]
 
     @staticmethod

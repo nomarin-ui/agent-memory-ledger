@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import re
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Iterable
 
 from rapidfuzz import fuzz
@@ -112,18 +112,7 @@ class EntityResolver:
 
     def _values_for(self, agent_id: str, key: str) -> list[str]:
         """Every distinct value this agent has ever held for this key."""
-        rows = self.storage._conn.execute(
-            "SELECT DISTINCT new_value FROM memory_operations "
-            "WHERE agent_id = ? AND key = ? AND new_value IS NOT NULL "
-            "  AND operation != 'entity_merge'",
-            (agent_id, key),
-        ).fetchall()
-        values = []
-        for r in rows:
-            decoded = json.loads(r["new_value"])
-            if isinstance(decoded, str):      # only resolve string values
-                values.append(decoded)
-        return values
+        return self.storage.distinct_values(agent_id, key)
 
     def _candidates(self, values: Iterable[str]) -> list[Candidate]:
         """Compare only within blocks. Score every pair that shares a bucket."""
@@ -235,13 +224,12 @@ class EntityResolver:
         )
 
         for alias in aliases:
-            self.storage._conn.execute(
-                "INSERT INTO entity_aliases "
-                "(canonical_id, alias, confidence, method, valid_from, valid_to) "
-                "VALUES (?, ?, ?, ?, ?, NULL)",
-                (canonical, alias, confidence,
-                 method if method in {"exact", "fuzzy", "claude", "manual"} else "fuzzy",
-                 ts),
+            self.storage.add_alias(
+                canonical_id=canonical,
+                alias=alias,
+                confidence=confidence,
+                method=method if method in {"exact", "fuzzy", "claude", "manual"} else "fuzzy",
+                valid_from=ts,
             )
 
         return Merge(canonical_id=canonical, aliases=aliases,
@@ -253,14 +241,7 @@ class EntityResolver:
         >>> resolver.aliases_for("entity_acme", "2026-06-20T00:00:00+00:00")
         ['ACME', 'Acme Corp']
         """
-        rows = self.storage._conn.execute(
-            "SELECT alias FROM entity_aliases "
-            "WHERE canonical_id = ? AND valid_from <= ? "
-            "  AND (valid_to IS NULL OR valid_to > ?) "
-            "ORDER BY alias",
-            (canonical_id, at, at),
-        ).fetchall()
-        return [r["alias"] for r in rows]
+        return self.storage.aliases_at(canonical_id, at)
 
     # -- the expensive part ---------------------------------------------
 

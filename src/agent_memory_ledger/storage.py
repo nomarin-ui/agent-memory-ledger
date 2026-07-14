@@ -1,17 +1,17 @@
 """SQLite storage adapter for the ledger."""
 from __future__ import annotations
 
+import json
 import sqlite3
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
 from .hashing import GENESIS_HASH, canonical_json, compute_op_hash
-
 from .migrations import current_version, migrate
 
-import threading
 
 def utcnow_iso() -> str:
     """ISO8601 UTC with microseconds. Lexicographically sortable."""
@@ -48,7 +48,7 @@ class SQLiteStorage:
         self._conn.execute("PRAGMA journal_mode = WAL")
         self._conn.execute("PRAGMA foreign_keys = ON")
         # Disabling the thread check does not make sqlite3 thread-safe. This
-        # lock serializes appends so two threads cannot read the same chain
+        # lock serializes writes so two threads cannot read the same chain
         # tip and fork the chain.
         self._lock = threading.RLock()
         self._migrate()
@@ -174,6 +174,19 @@ class SQLiteStorage:
                 (ts or utcnow_iso(), agent_id, key, op_id_seen, provenance),
             )
 
+    def add_alias(
+        self, *, canonical_id: str, alias: str, confidence: float,
+        method: str, valid_from: str,
+    ) -> None:
+        """Open an alias row. Time-bounded: a day-40 merge is invisible on day 20."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO entity_aliases "
+                "(canonical_id, alias, confidence, method, valid_from, valid_to) "
+                "VALUES (?, ?, ?, ?, ?, NULL)",
+                (canonical_id, alias, confidence, method, valid_from),
+            )
+
     # -- queries -------------------------------------------------------
 
     def current(self, agent_id: str, key: str) -> sqlite3.Row | None:
@@ -212,6 +225,51 @@ class SQLiteStorage:
             "SELECT * FROM memory_operations WHERE agent_id = ? ORDER BY id",
             (agent_id,),
         )
+
+    def reads_before(
+        self, agent_id: str, at: str, *, key: str | None = None, limit: int = 50,
+    ) -> list[sqlite3.Row]:
+        """Reads by this agent up to `at`, newest first, joined to what was seen."""
+        sql = (
+            "SELECT r.ts, r.key, r.provenance, r.op_id_seen, "
+            "       o.new_value AS value_seen, o.ts AS written_at "
+            "FROM memory_reads r "
+            "LEFT JOIN memory_operations o ON o.id = r.op_id_seen "
+            "WHERE r.agent_id = ? AND r.ts <= ? "
+        )
+        params: list[Any] = [agent_id, at]
+        if key is not None:
+            sql += "AND r.key = ? "
+            params.append(key)
+        sql += "ORDER BY r.ts DESC, r.id DESC LIMIT ?"
+        params.append(limit)
+        return self._conn.execute(sql, params).fetchall()
+
+    def distinct_values(self, agent_id: str, key: str) -> list[str]:
+        """Every distinct string value this agent has ever held for this key."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT new_value FROM memory_operations "
+            "WHERE agent_id = ? AND key = ? AND new_value IS NOT NULL "
+            "  AND operation != 'entity_merge'",
+            (agent_id, key),
+        ).fetchall()
+        out: list[str] = []
+        for r in rows:
+            decoded = json.loads(r["new_value"])
+            if isinstance(decoded, str):        # only resolve string values
+                out.append(decoded)
+        return out
+
+    def aliases_at(self, canonical_id: str, at: str) -> list[str]:
+        """Aliases believed at instant `at`."""
+        rows = self._conn.execute(
+            "SELECT alias FROM entity_aliases "
+            "WHERE canonical_id = ? AND valid_from <= ? "
+            "  AND (valid_to IS NULL OR valid_to > ?) "
+            "ORDER BY alias",
+            (canonical_id, at, at),
+        ).fetchall()
+        return [r["alias"] for r in rows]
 
     # -- integrity -----------------------------------------------------
 
