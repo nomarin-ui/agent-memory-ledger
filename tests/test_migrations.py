@@ -33,22 +33,22 @@ def test_empty_db_is_version_zero(tmp_path):
 def test_migrate_applies_and_records(tmp_path):
     conn = sqlite3.connect(tmp_path / "x.db", isolation_level=None)
     applied = migrate(conn)
-    assert applied == [1]
-    assert current_version(conn) == 1
+    assert applied == [1, 2]
+    assert current_version(conn) == 2
     conn.close()
 
 
 def test_migrate_is_idempotent(tmp_path):
     """Running twice must not reapply. This is the whole point."""
     conn = sqlite3.connect(tmp_path / "x.db", isolation_level=None)
-    assert migrate(conn) == [1]
+    assert migrate(conn) == [1, 2]
     assert migrate(conn) == []      # nothing pending the second time
     conn.close()
 
 
 def test_storage_reports_schema_version(db_path):
     st = SQLiteStorage(db_path)
-    assert st.schema_version == 1
+    assert st.schema_version == 2
     st.close()
 
 
@@ -86,3 +86,21 @@ def test_migrations_reach_working_schema(db_path):
     assert lg.snapshot() == {"k": "v"}
     assert lg.verify() == 1
     lg.close()
+
+def test_migration_002_preserves_the_chain(db_path):
+    """Rebuilding the ops table must not break tamper-evidence."""
+    from agent_memory_ledger import MemoryLedger
+
+    lg = MemoryLedger("a", db_path)
+    lg.write("k", "v1")
+    lg.write("k", "v2")
+    assert lg.verify() == 2          # chain survives the table rebuild
+    assert lg.storage.schema_version == 2
+    lg.close()
+
+
+def test_entity_merge_operation_is_allowed(storage):
+    """002 widened the CHECK constraint."""
+    op = storage.append(agent_id="a", operation="entity_merge",
+                        key="entity_acme", new_value={"aliases": ["A", "B"]})
+    assert op.operation == "entity_merge"    
