@@ -43,28 +43,44 @@ python examples/stale_belief_incident.py
 
 ## Quick start
 
-```python
-from agent_memory_ledger import MemoryLedger
-from datetime import timedelta
-
-with MemoryLedger("my_agent", "ledger.db") as ledger:
-    # Record what the agent believes, and why it believes it
-    ledger.write("user_employer", "Acme Corp", provenance="user said so")
-
-    # The agent consults its memory
-    employer = ledger.read("user_employer", provenance="drafting email")
-
-    # Later: something went wrong. What did it act on?
-    for r in ledger.reads_before(incident_time):
-        print(f"{r.key}: {r.value_seen!r}, {r.age_at_read.days} days old at read")
-
-    # What did it believe at that exact moment?
-    ledger.as_of("2026-04-05T10:05:00+00:00")
-    # {'user_employer': 'Acme Corp', 'user_seniority': 'senior engineer'}
-
-    # Has anyone edited this record after the fact?
-    ledger.verify()   # raises ChainIntegrityError if so
+```bash
+pip install agent-memory-ledger
+aml --db demo.db --agent demo-agent demo
+aml --db demo.db --agent demo-agent incident 2026-04-05T10:05:00+00:00
 ```
+
+The third command answers the question you actually have at 2am — *why did the
+agent believe that?*
+
+```
+Incident window: up to 2026-04-05T10:05:00
+
+  WHAT IT READ
+      ok   user_seniority         senior engineer        43d old at read
+           why: drafting outreach email -- need seniority
+    STALE  user_employer          Acme Corp              94d old at read
+           why: drafting outreach email -- need current employer
+
+  WHAT IT BELIEVED
+    user_employer          = Acme Corp
+    user_seniority         = senior engineer
+
+  Chain verified: 3 operations.
+```
+
+The agent read `user_employer` one minute before it sent the email. The value
+was 94 days old. It was written once, in January, from a single onboarding
+message, and never checked again — the user changed jobs in March and nobody
+told the agent.
+
+A memory backend can only tell you the value is `Acme Corp`. The ledger tells
+you when the agent read it, how stale it was at that instant, where it came
+from, and — via the hash chain — that nobody edited the record afterward to
+make the incident look better than it was.
+
+The full scenario, with provenance and belief reconstruction, is in
+[`examples/stale_belief_incident.py`](examples/stale_belief_incident.py).
+See [ARCHITECTURE.md](ARCHITECTURE.md) for how it works.
 
 ## API
 

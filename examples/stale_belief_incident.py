@@ -14,12 +14,6 @@ from agent_memory_ledger import MemoryLedger
 
 DB = "incident.db"
 
-# The timeline. Real timestamps -- the ledger does the date math, not us.
-JAN_01 = "2026-01-01T09:15:00+00:00"     # agent learns where the user works
-MAR_12 = "2026-03-12T00:00:00+00:00"     # user changes jobs. Agent is not told.
-APR_05_READ = "2026-04-05T10:04:00+00:00"   # agent consults its memory
-APR_05_ACTION = "2026-04-05T10:05:00+00:00"  # agent acts on what it read
-
 RULE = "─" * 66
 
 
@@ -36,26 +30,16 @@ APR_05_ACTION = "2026-04-05T10:05:00+00:00"
 
 def build_incident(ledger: MemoryLedger) -> None:
     """Replay what actually happened, in order."""
-    a = ledger.agent_id
 
     # January: onboarding. The agent learns two things.
-    ledger.storage.append(
-        agent_id=a, operation="write", key="user_employer",
-        new_value="Acme Corp", provenance="user said so in onboarding chat",
-        ts=JAN_01,
-    )
-    ledger.storage.append(
-        agent_id=a, operation="write", key="user_seniority",
-        new_value="mid-level engineer", provenance="inferred from resume",
-        ts=JAN_01,
-    )
+    ledger.write("user_employer", "Acme Corp",
+                 provenance="user said so in onboarding chat", at=JAN_01)
+    ledger.write("user_seniority", "mid-level engineer",
+                 provenance="inferred from resume", at=JAN_01)
 
     # February: the user mentions a promotion in passing. The agent updates.
-    ledger.storage.append(
-        agent_id=a, operation="update", key="user_seniority",
-        old_value="mid-level engineer", new_value="senior engineer",
-        provenance="user mentioned promotion in chat", ts=FEB_20,
-    )
+    ledger.write("user_seniority", "senior engineer",
+                 provenance="user mentioned promotion in chat", at=FEB_20)
 
     # March 12: the user changes jobs.
     #
@@ -65,16 +49,12 @@ def build_incident(ledger: MemoryLedger) -> None:
     # market, and it is the thing the ledger makes visible.
 
     # April 5: the agent consults memory before drafting an outreach email.
-    ledger.storage.log_read(
-        agent_id=a, key="user_employer", op_id_seen=1,
-        provenance="drafting outreach email -- need current employer",
-        ts=APR_05_READ,
-    )
-    ledger.storage.log_read(
-        agent_id=a, key="user_seniority", op_id_seen=3,   # the Feb update
-        provenance="drafting outreach email -- need seniority",
-        ts=APR_05_READ,
-    )
+    ledger.read("user_employer",
+                provenance="drafting outreach email -- need current employer",
+                at=APR_05_READ)
+    ledger.read("user_seniority",
+                provenance="drafting outreach email -- need seniority",
+                at=APR_05_READ)
 
 
 def main() -> None:

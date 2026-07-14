@@ -49,8 +49,20 @@ class MemoryLedger:
 
     # -- mutations -----------------------------------------------------
 
-    def write(self, key: str, value: Any, *, provenance: str | None = None) -> Operation:
-        """Record a belief. If the key already exists this is an 'update'."""
+    def write(
+        self,
+        key: str,
+        value: Any,
+        *,
+        provenance: str | None = None,
+        at: str | datetime | None = None,
+    ) -> Operation:
+        """Record a belief. If the key already exists this is an 'update'.
+
+        `at` backdates the operation. Defaults to now. Use it to backfill
+        history from an existing memory store; the hash chain covers the
+        timestamp, so a backdated op is as tamper-evident as a live one.
+        """
         existing = self.storage.current(self.agent_id, key)
         had_value = existing is not None and existing["value"] is not None
         return self.storage.append(
@@ -60,9 +72,16 @@ class MemoryLedger:
             old_value=_decode(existing["value"]) if had_value else None,
             new_value=value,
             provenance=provenance,
+            ts=_to_iso(at) if at is not None else None,
         )
 
-    def delete(self, key: str, *, provenance: str | None = None) -> Operation:
+    def delete(
+        self,
+        key: str,
+        *,
+        provenance: str | None = None,
+        at: str | datetime | None = None,
+    ) -> Operation:
         """Forget a belief. The fact that it was forgotten is itself recorded."""
         existing = self.storage.current(self.agent_id, key)
         return self.storage.append(
@@ -72,9 +91,16 @@ class MemoryLedger:
             old_value=_decode(existing["value"]) if existing else None,
             new_value=None,
             provenance=provenance,
+            ts=_to_iso(at) if at is not None else None,
         )
 
-    def decay(self, key: str, *, provenance: str | None = None) -> Operation:
+    def decay(
+        self,
+        key: str,
+        *,
+        provenance: str | None = None,
+        at: str | datetime | None = None,
+    ) -> Operation:
         """Like delete, but attributed to a decay policy rather than a decision."""
         existing = self.storage.current(self.agent_id, key)
         return self.storage.append(
@@ -84,11 +110,18 @@ class MemoryLedger:
             old_value=_decode(existing["value"]) if existing else None,
             new_value=None,
             provenance=provenance or "decay policy",
+            ts=_to_iso(at) if at is not None else None,
         )
 
     # -- reads ---------------------------------------------------------
 
-    def read(self, key: str, *, provenance: str | None = None) -> Any:
+    def read(
+        self,
+        key: str,
+        *,
+        provenance: str | None = None,
+        at: str | datetime | None = None,
+    ) -> Any:
         """Return the current belief and log that it was consulted.
 
         The read log is what lets you prove the agent *acted on* a stale
@@ -101,6 +134,7 @@ class MemoryLedger:
             key=key,
             op_id_seen=row["op_id"] if row else None,
             provenance=provenance,
+            ts=_to_iso(at) if at is not None else None,
         )
         return value
 
