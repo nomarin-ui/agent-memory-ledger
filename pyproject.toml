@@ -1,0 +1,30 @@
+[project]
+name = "agent-memory-ledger"
+version = "0.0.1.dev0"
+description = "An append-only, auditable ledger for LLM agent memory."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "anthropic>=0.40",
+    "rapidfuzz>=3.9",
+    "click>=8.1",
+]
+
+[project.optional-dependencies]
+langchain = ["langchain-core>=0.3"]
+postgres  = ["psycopg[binary]>=3.2"]
+dev       = ["pytest>=8", "pytest-cov", "ruff", "mypy"]
+
+[project.scripts]
+aml = "agent_memory_ledger.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_memory_ledger"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
