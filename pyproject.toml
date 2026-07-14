@@ -4,7 +4,7 @@ version = "0.0.1.dev0"
 description = "An append-only, auditable ledger for LLM agent memory."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "Apache-2.0" }
+license = { text = "MIT" }
 dependencies = [
     "anthropic>=0.40",
     "rapidfuzz>=3.9",
